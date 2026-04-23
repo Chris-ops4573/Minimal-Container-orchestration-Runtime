@@ -1,3 +1,5 @@
 *.db
+*.log
+
 server
 client

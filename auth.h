@@ -4,7 +4,6 @@
 #include <stdio.h>
 
 typedef enum {
-    ROLE_NONE,
     ROLE_USER,
     ROLE_ADMIN
 } role_t;
@@ -16,6 +15,7 @@ typedef struct {
 } session_t;
 
 // API
+int bootstrap_admin();
 int signup(const char *username, const char *password, role_t role);
 int login(const char *username, const char *password, session_t *session);
 

@@ -4,8 +4,10 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+
 #include "auth.h"
 #include "container.h"
+#include "logger.h"
 
 #define PORT 8080
 
@@ -111,6 +113,12 @@ void *worker(void *arg) {
             if (total <= 0) break;
             buffer[total] = '\0';
 
+            // END 
+            if(strncmp(buffer, "END", 3) == 0) {
+                write(client_fd, "<<END>>\n", 9);
+                break;
+            }
+
             // SIGNUP
             if (strncmp(buffer, "SIGNUP", 6) == 0) {
                 char *saveptr;
@@ -120,12 +128,25 @@ void *worker(void *arg) {
                 char *pass = strtok_r(NULL, " ", &saveptr);
                 char *role = strtok_r(NULL, " \n", &saveptr);
 
+                if(!role || !pass || !user){
+                    write(client_fd, "USAGE: SIGNUP <username> <password> USER\n", 41);
+                    continue;
+                }
+
+                if(strcmp(role, "USER") != 0){
+                    write(client_fd, "SIGNUP FAILED: role must be USER\n", 33);
+                    continue;
+                }
+
                 role_t r = string_to_role(role);
 
-                if (signup(user, pass, r) == 0)
+                if (signup(user, pass, r) == 0){
                     write(client_fd, "SIGNUP OK\n", 10);
-                else
+                    log_event(user, "SIGNUP", "user created");
+                }
+                else{
                     write(client_fd, "SIGNUP FAIL\n", 12);
+                }
 
                 continue;
             }
@@ -138,10 +159,14 @@ void *worker(void *arg) {
                 char *user = strtok_r(NULL, " ", &saveptr);
                 char *pass = strtok_r(NULL, " \n", &saveptr);
 
-                if (login(user, pass, &session) == 0)
+                if (login(user, pass, &session) == 0){
                     write(client_fd, "LOGIN OK\n", 9);
-                else
+                    log_event(user, "LOGIN", "user logged in");
+                }
+                else{
                     write(client_fd, "LOGIN FAIL\n", 11);
+                    log_event(user, "LOGIN", "failed");
+                }
 
                 continue;
             }
@@ -153,6 +178,8 @@ void *worker(void *arg) {
 
             // CONTAINER LOGIC 
             if (strncmp(buffer, "RUN", 3) == 0) {
+                log_event(session.username, "RUN", buffer);
+                
                 struct child_config config = {0};
                 build_config(buffer, &config);
 
@@ -162,14 +189,29 @@ void *worker(void *arg) {
                         "[thread %d] user=%s running container\n",
                         id, session.username);
 
-                run_container(&config);
+                int ret = run_container(&config);
+
+                // CONTAINER RETURN STATUS LOGGED
+                if(ret == 1)
+                    log_event(session.username, "RUN", "failed");
+                else
+                    log_event(session.username, "RUN", "succeeded");
+
                 continue;
             }
 
-            // END 
-            if(strncmp(buffer, "END", 3) == 0) {
-                write(client_fd, "<<END>>\n", 9);
-                break;
+            // ADMIN LOG REQUEST
+            if (strncmp(buffer, "GET_LOGS", 8) == 0) {
+                if (session.role != ROLE_ADMIN) {
+                    log_event(session.username, "GET_LOGS", "failed");
+
+                    write(client_fd, "Permission denied\n", 18);
+                    continue;
+                }
+
+                log_event(session.username, "GET_LOGS", "succeeded");
+                send_logs_to_client(client_fd);
+                continue;
             }
 
             write(client_fd, "Unknown command\n", 16);
@@ -182,6 +224,8 @@ void *worker(void *arg) {
 int main() {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+
+    bootstrap_admin();
 
     struct sockaddr_in addr = {
         .sin_family = AF_INET,

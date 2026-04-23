@@ -367,7 +367,7 @@ int resources(struct child_config *config){
 
     fprintf(stderr, "=> setting cgroups v2...");
 
-    // create cgroup directory
+    // CREATE
     if(snprintf(dir, sizeof(dir), "/sys/fs/cgroup/%s", config->hostname) < 0){
         fprintf(stderr, "snprintf failed: %m\n");
         return -1;
@@ -520,7 +520,6 @@ int free_resources(struct child_config *config){
 int child(void *arg){
 	struct child_config *config = arg;
 
-	// if io_fd == config->fd, dup2 earlier would have clobbered the socketpair
 fprintf(stderr, "[child] io_fd=%d config->fd=%d\n", config->io_fd, config->fd);
 	
 	if (sethostname(config->hostname, strlen(config->hostname))

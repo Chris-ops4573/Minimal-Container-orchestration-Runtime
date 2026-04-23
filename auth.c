@@ -14,15 +14,15 @@ const char* role_to_string(role_t role) {
     switch(role) {
         case ROLE_ADMIN: return "ADMIN";
         case ROLE_USER: return "USER";
-        default: return "NONE";
+        default: return "USER";
     }
 }
 
 role_t string_to_role(const char *str) {
-    if (!str) return ROLE_NONE;
+    if (!str) return ROLE_USER;
     if (strcmp(str, "ADMIN") == 0) return ROLE_ADMIN;
     if (strcmp(str, "USER") == 0) return ROLE_USER;
-    return ROLE_NONE;
+    return ROLE_USER;
 }
 
 // LOCKING
@@ -78,11 +78,50 @@ static int user_exists(int fd, const char *username) {
     return 0;
 }
 
+int admin_exists() {
+    int fd = open(USER_DB, O_RDONLY);
+    if (fd < 0) return 0;
+
+    char buf[BUF_SIZE];
+    read_all(fd, buf, sizeof(buf));
+
+    char *save_line;
+    char *line = strtok_r(buf, "\n", &save_line);
+
+    while (line) {
+        char *save_field;
+        strtok_r(line, ":", &save_field);           // username
+        strtok_r(NULL, ":", &save_field);           // hash
+        char *role = strtok_r(NULL, ":\n", &save_field);
+
+        if (role && strcmp(role, "ADMIN") == 0) {
+            close(fd);
+            return 1;
+        }
+
+        line = strtok_r(NULL, "\n", &save_line);
+    }
+
+    close(fd);
+    return 0;
+}
+
+int bootstrap_admin() {
+    if (admin_exists()) return 0;
+
+    fprintf(stderr, "[BOOTSTRAP] No admin found. Creating default admin...\n");
+
+    if (signup("admin", "admin123", ROLE_ADMIN) == 0) {
+        fprintf(stderr, "[BOOTSTRAP] Admin created: admin/admin123\n");
+        return 0;
+    }
+
+    fprintf(stderr, "[BOOTSTRAP] Failed to create admin\n");
+    return -1;
+}
+
 int signup(const char *username, const char *password, role_t role) {
     if (!username || !password) return -1;
-
-    // prevent arbitrary admin creation
-    if (role == ROLE_ADMIN) return -1;
 
     int fd = open(USER_DB, O_RDWR | O_CREAT, 0644);
     if (fd < 0) return -1;
