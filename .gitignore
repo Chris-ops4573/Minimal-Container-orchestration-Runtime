@@ -1,6 +1,5 @@
 *.db
 *.log
-/test_dir
 
 server
 client
