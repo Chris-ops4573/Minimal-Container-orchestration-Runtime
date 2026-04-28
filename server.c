@@ -4,6 +4,9 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <sys/epoll.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #include "auth.h"
 #include "container.h"
@@ -14,9 +17,14 @@
 #define QUEUE_SIZE 64
 #define THREAD_COUNT 4
 
+typedef struct {
+    int fd;
+    char buffer[1024];
+} job_t;
+
 // QUEUE LOGIC
 typedef struct {
-    int fds[QUEUE_SIZE];
+    job_t jobs[QUEUE_SIZE];
     int front, rear, count;
 
     pthread_mutex_t lock;
@@ -33,13 +41,13 @@ void queue_init(queue_t *q) {
     pthread_cond_init(&q->not_full, NULL);
 }
 
-void enqueue(queue_t *q, int fd) {
+void enqueue(queue_t *q, job_t job) {
     pthread_mutex_lock(&q->lock);
 
     while (q->count == QUEUE_SIZE)
         pthread_cond_wait(&q->not_full, &q->lock);
 
-    q->fds[q->rear] = fd;
+    q->jobs[q->rear] = job;
     q->rear = (q->rear + 1) % QUEUE_SIZE;
     q->count++;
 
@@ -47,20 +55,20 @@ void enqueue(queue_t *q, int fd) {
     pthread_mutex_unlock(&q->lock);
 }
 
-int dequeue(queue_t *q) {
+job_t dequeue(queue_t *q) {
     pthread_mutex_lock(&q->lock);
 
     while (q->count == 0)
         pthread_cond_wait(&q->not_empty, &q->lock);
 
-    int fd = q->fds[q->front];
+    job_t job = q->jobs[q->front];
     q->front = (q->front + 1) % QUEUE_SIZE;
     q->count--;
 
     pthread_cond_signal(&q->not_full);
     pthread_mutex_unlock(&q->lock);
 
-    return fd;
+    return job;
 }
 
 // COMMAND PARSER
@@ -86,138 +94,135 @@ void build_config(char *input, struct child_config *config) {
     config->argc = argc;
 }
 
+int make_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
 // WORKER
 void *worker(void *arg) {
     int id = (int)(long)arg;
 
     while (1) {
-        int client_fd = dequeue(&q);
+        job_t job = dequeue(&q);
+        int client_fd = job.fd;
+        char* buffer = job.buffer;
+
         fprintf(stderr, "[thread %d] handling client\n", id);
 
-        session_t session = {0};
-
-        char buffer[1024];
-
-        while (1) {
-            memset(buffer, 0, sizeof(buffer));
-
-            int total = 0;
-            while (1) {
-                int n = read(client_fd, buffer + total,
-                             sizeof(buffer) - total - 1);
-                if (n <= 0) break;
-                total += n;
-                if (buffer[total - 1] == '\n') break;
-            }
-
-            if (total <= 0) break;
-            buffer[total] = '\0';
-
-            // END 
-            if(strncmp(buffer, "END", 3) == 0) {
-                write(client_fd, "<<END>>\n", 9);
-                break;
-            }
-
-            // SIGNUP
-            if (strncmp(buffer, "SIGNUP", 6) == 0) {
-                char *saveptr;
-
-                strtok_r(buffer, " ", &saveptr);
-                char *user = strtok_r(NULL, " ", &saveptr);
-                char *pass = strtok_r(NULL, " ", &saveptr);
-                char *role = strtok_r(NULL, " \n", &saveptr);
-
-                if(!role || !pass || !user){
-                    write(client_fd, "USAGE: SIGNUP <username> <password> USER\n", 41);
-                    continue;
-                }
-
-                if(strcmp(role, "USER") != 0){
-                    write(client_fd, "SIGNUP FAILED: role must be USER\n", 33);
-                    continue;
-                }
-
-                role_t r = string_to_role(role);
-
-                if (signup(user, pass, r) == 0){
-                    write(client_fd, "SIGNUP OK\n", 10);
-                    log_event(user, "SIGNUP", "user created");
-                }
-                else{
-                    write(client_fd, "SIGNUP FAIL\n", 12);
-                }
-
-                continue;
-            }
-
-            // LOGIN
-            if (strncmp(buffer, "LOGIN", 5) == 0) {
-                char *saveptr;
-
-                strtok_r(buffer, " ", &saveptr);
-                char *user = strtok_r(NULL, " ", &saveptr);
-                char *pass = strtok_r(NULL, " \n", &saveptr);
-
-                if (login(user, pass, &session) == 0){
-                    write(client_fd, "LOGIN OK\n", 9);
-                    log_event(user, "LOGIN", "user logged in");
-                }
-                else{
-                    write(client_fd, "LOGIN FAIL\n", 11);
-                    log_event(user, "LOGIN", "failed");
-                }
-
-                continue;
-            }
-
-            if (!session.authenticated) {
-                write(client_fd, "Please login first\n", 19);
-                continue;
-            }
-
-            // CONTAINER LOGIC 
-            if (strncmp(buffer, "RUN", 3) == 0) {
-                log_event(session.username, "RUN", buffer);
-                
-                struct child_config config = {0};
-                build_config(buffer, &config);
-
-                config.io_fd = client_fd;
-
-                fprintf(stderr,
-                        "[thread %d] user=%s running container\n",
-                        id, session.username);
-
-                int ret = run_container(&config);
-
-                // CONTAINER RETURN STATUS LOGGED
-                if(ret == 1)
-                    log_event(session.username, "RUN", "failed");
-                else
-                    log_event(session.username, "RUN", "succeeded");
-
-                continue;
-            }
-
-            // ADMIN LOG REQUEST
-            if (strncmp(buffer, "GET_LOGS", 8) == 0) {
-                if (session.role != ROLE_ADMIN) {
-                    log_event(session.username, "GET_LOGS", "failed");
-
-                    write(client_fd, "Permission denied\n", 18);
-                    continue;
-                }
-
-                log_event(session.username, "GET_LOGS", "succeeded");
-                send_logs_to_client(client_fd);
-                continue;
-            }
-
-            write(client_fd, "Unknown command\n", 16);
+        session_t *session = session_get(client_fd);
+        if(!session){
+            write(client_fd, "Session failed!\n", 16);
+            close(client_fd);
+            session_delete(client_fd);
+            continue;
+        }
+            
+        // END 
+        if(strncmp(buffer, "END", 3) == 0) {
+            write(client_fd, "<<END>>\n", 9);
+            
+            close(client_fd);
+            session_delete(client_fd);
+            continue;
         }
 
-        close(client_fd);
+        // SIGNUP
+        if (strncmp(buffer, "SIGNUP", 6) == 0) {
+            char *saveptr;
+
+            strtok_r(buffer, " ", &saveptr);
+            char *user = strtok_r(NULL, " ", &saveptr);
+            char *pass = strtok_r(NULL, " ", &saveptr);
+            char *role = strtok_r(NULL, " \n", &saveptr);
+
+            if(!role || !pass || !user){
+                write(client_fd, "USAGE: SIGNUP <username> <password> USER\n", 41);
+                continue;
+            }
+
+            if(strcmp(role, "USER") != 0){
+                write(client_fd, "SIGNUP FAILED: role must be USER\n", 33);
+                continue;
+            }
+
+            role_t r = string_to_role(role);
+
+            if (signup(user, pass, r) == 0){
+                write(client_fd, "SIGNUP OK\n", 10);
+                log_event(user, "SIGNUP", "user created");
+            }
+            else{
+                write(client_fd, "SIGNUP FAIL\n", 12);
+            }
+
+            continue;
+        }
+
+        // LOGIN
+        if (strncmp(buffer, "LOGIN", 5) == 0) {
+            char *saveptr;
+
+            strtok_r(buffer, " ", &saveptr);
+            char *user = strtok_r(NULL, " ", &saveptr);
+            char *pass = strtok_r(NULL, " \n", &saveptr);
+
+            if (login(user, pass, session) == 0){
+                write(client_fd, "LOGIN OK\n", 9);
+                log_event(user, "LOGIN", "user logged in");
+            }
+            else{
+                write(client_fd, "LOGIN FAIL\n", 11);
+                log_event(user, "LOGIN", "failed");
+            }
+
+            continue;
+        }
+
+        if (!session->authenticated) {
+            write(client_fd, "Please login first\n", 19);
+            continue;
+        }
+
+        // CONTAINER LOGIC 
+        if (strncmp(buffer, "RUN", 3) == 0) {
+            log_event(session->username, "RUN", buffer);
+            
+            struct child_config config = {0};
+            build_config(buffer, &config);
+
+            config.io_fd = client_fd;
+
+            fprintf(stderr,
+                    "[thread %d] user=%s running container\n",
+                    id, session->username);
+
+            int ret = run_container(&config);
+
+            // CONTAINER RETURN STATUS LOGGED
+            if(ret == 1)
+                log_event(session->username, "RUN", "failed");
+            else
+                log_event(session->username, "RUN", "succeeded");
+
+            continue;
+        }
+
+        // ADMIN LOG REQUEST
+        if (strncmp(buffer, "GET_LOGS", 8) == 0) {
+            if (session->role != ROLE_ADMIN) {
+                log_event(session->username, "GET_LOGS", "failed");
+
+                write(client_fd, "Permission denied\n", 18);
+                continue;
+            }
+
+            log_event(session->username, "GET_LOGS", "succeeded");
+            send_logs_to_client(client_fd);
+            continue;
+        }
+
+        write(client_fd, "Unknown command\n", 16);
     }
 }
 
@@ -235,7 +240,6 @@ int main() {
     
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
-    // ADD THIS before bind()
     int opt = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         fprintf(stderr, "setsockopt SO_REUSEADDR");
@@ -260,14 +264,61 @@ int main() {
         pthread_create(&threads[i], NULL, worker, (void*)(long)i);
     }
 
+    int epfd = epoll_create1(0);
+
+    struct epoll_event ev, events[64];
+
+    make_nonblocking(server_fd);
+
+    ev.events = EPOLLIN;
+    ev.data.fd = server_fd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev);
+
     while (1) {
-        int client_fd = accept(server_fd, NULL, NULL);
+        int n = epoll_wait(epfd, events, 64, -1);
 
-        if (client_fd < 0) {
-            fprintf(stderr, "accept");
-            continue;
+        for (int i = 0; i < n; i++) {
+            int fd = events[i].data.fd;
+
+            if (fd == server_fd) {
+                while (1) {
+                    int client_fd = accept(server_fd, NULL, NULL);
+                    if (client_fd < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                            break;
+                        else
+                            break;
+                    }
+
+                    make_nonblocking(client_fd);
+                    session_create(client_fd);
+
+                    struct epoll_event cev;
+                    cev.events = EPOLLIN;
+                    cev.data.fd = client_fd;
+
+                    epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev);
+                }
+            }
+
+            else {
+                char buffer[1024];
+                int nread = read(fd, buffer, sizeof(buffer) - 1);
+
+                if (nread <= 0) {
+                    close(fd);
+                    session_delete(fd);
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    continue;
+                }
+
+                buffer[nread] = '\0';
+
+                job_t job = { .fd = fd };
+                strcpy(job.buffer, buffer);
+
+                enqueue(&q, job);
+            }
         }
-
-        enqueue(&q, client_fd);
     }
 }

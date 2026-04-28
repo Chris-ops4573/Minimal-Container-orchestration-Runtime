@@ -6,9 +6,22 @@
 #include <stdlib.h>
 #include <crypt.h>
 #include <stdio.h>
+#include <pthread.h>
 
 #define USER_DB "users.db"
 #define BUF_SIZE 4096
+
+// SESSION STORE
+#define MAX_CLIENTS 1024
+
+typedef struct {
+    int used;
+    int fd;
+    session_t session;
+} session_entry_t;
+
+static session_entry_t sessions[MAX_CLIENTS];
+static pthread_mutex_t session_lock = PTHREAD_MUTEX_INITIALIZER;
 
 const char* role_to_string(role_t role) {
     switch(role) {
@@ -224,4 +237,48 @@ int login(const char *username, const char *password, session_t *session) {
     unlock_file(fd);
     close(fd);
     return -1;
+}
+
+// SESSION HELPERS
+void session_create(int fd) {
+    pthread_mutex_lock(&session_lock);
+
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (!sessions[i].used) {
+            sessions[i].used = 1;
+            sessions[i].fd = fd;
+            memset(&sessions[i].session, 0, sizeof(session_t));
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&session_lock);
+}
+
+session_t *session_get(int fd) {
+    pthread_mutex_lock(&session_lock);
+
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (sessions[i].used && sessions[i].fd == fd) {
+            session_t *s = &sessions[i].session;
+            pthread_mutex_unlock(&session_lock);
+            return s;
+        }
+    }
+
+    pthread_mutex_unlock(&session_lock);
+    return NULL;
+}
+
+void session_delete(int fd) {
+    pthread_mutex_lock(&session_lock);
+
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (sessions[i].used && sessions[i].fd == fd) {
+            sessions[i].used = 0;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&session_lock);
 }
