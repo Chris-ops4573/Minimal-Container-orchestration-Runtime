@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <semaphore.h>
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
@@ -25,48 +26,44 @@ typedef struct {
 // QUEUE LOGIC
 typedef struct {
     job_t jobs[QUEUE_SIZE];
-    int front, rear, count;
+    int front, rear;
 
     pthread_mutex_t lock;
-    pthread_cond_t not_empty;
-    pthread_cond_t not_full;
+    sem_t items;
+    sem_t spaces;
 } queue_t;
 
 queue_t q;
 
 void queue_init(queue_t *q) {
-    q->front = q->rear = q->count = 0;
+    q->front = q->rear = 0;
     pthread_mutex_init(&q->lock, NULL);
-    pthread_cond_init(&q->not_empty, NULL);
-    pthread_cond_init(&q->not_full, NULL);
+    sem_init(&q->items, 0, 0);
+    sem_init(&q->spaces, 0, QUEUE_SIZE);
 }
 
 void enqueue(queue_t *q, job_t job) {
-    pthread_mutex_lock(&q->lock);
+    sem_wait(&q->spaces);
 
-    while (q->count == QUEUE_SIZE)
-        pthread_cond_wait(&q->not_full, &q->lock);
+    pthread_mutex_lock(&q->lock);
 
     q->jobs[q->rear] = job;
     q->rear = (q->rear + 1) % QUEUE_SIZE;
-    q->count++;
 
-    pthread_cond_signal(&q->not_empty);
     pthread_mutex_unlock(&q->lock);
+    sem_post(&q->items);
 }
 
 job_t dequeue(queue_t *q) {
-    pthread_mutex_lock(&q->lock);
+    sem_wait(&q->items);
 
-    while (q->count == 0)
-        pthread_cond_wait(&q->not_empty, &q->lock);
+    pthread_mutex_lock(&q->lock);
 
     job_t job = q->jobs[q->front];
     q->front = (q->front + 1) % QUEUE_SIZE;
-    q->count--;
 
-    pthread_cond_signal(&q->not_full);
     pthread_mutex_unlock(&q->lock);
+    sem_post(&q->spaces);
 
     return job;
 }
@@ -222,7 +219,7 @@ void *worker(void *arg) {
             continue;
         }
 
-        write(client_fd, "Unknown command\n", 16);
+        write(client_fd, "Unknown command\nUsage: RUN <process_uid> <path_to_code_files> <executable_command>\n", 80);
     }
 }
 
