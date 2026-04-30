@@ -486,7 +486,6 @@ int assign_to_cgroups(pid_t child_pid, struct child_config *config){
 
 int free_resources(struct child_config *config){
     char dir[PATH_MAX] = {0};
-    char path[PATH_MAX] = {0};
     int fd = 0;
 
     if(!config->hostname) return 0;
