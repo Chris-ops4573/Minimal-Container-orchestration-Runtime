@@ -97,19 +97,22 @@ void test_forkbomb() {
 
 void test_fd_limit() {
     printf("\n[TEST] file descriptor exhaustion\n");
-    int fds[1024];
-    int count = 0;
 
-    for (int i = 0; i < 1024; i++) {
-        int fd = open("/dev/null", O_RDONLY);
-        if (fd < 0) {
-            printf("✔ fd limit hit at %d: %s\n", count, strerror(errno));
+    int count = 0;
+    int fds[100][2];
+
+    while (count < 100) {
+        if (pipe(fds[count]) < 0) {
+            printf("✔ fd limit hit at %d: %s\n", count * 2, strerror(errno));
             break;
         }
-        fds[count++] = fd;
+        count++;
     }
 
-    for (int i = 0; i < count; i++) close(fds[i]);
+    for (int i = 0; i < count; i++) {
+        close(fds[i][0]);
+        close(fds[i][1]);
+    }
 }
 
 int main() {

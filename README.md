@@ -39,7 +39,7 @@ Client → Server → Authentication → Authorization → Container Execution �
 - `logger.c`, `logger.h`  
   Logging system with safe concurrent access
 
-- `breakout.c`  
+- `test_dir/breakout.c`  
   Security test suite for container isolation
 
 ---
@@ -73,6 +73,7 @@ Run client:
 - `LOGIN <username> <password>`
 - `RUN <uid> <rootfs> <command>`
 - `GET_LOGS` (admin only)
+- `STOP_SERVER` (admin only)
 - `END`
 
 ---
@@ -86,7 +87,7 @@ Run client:
 - Enforced in server before privileged operations
 
 Example:
-- Only ADMIN can execute `GET_LOGS`
+- Only ADMIN can execute `GET_LOGS` and `STOP_SERVER`
 - USER can execute container commands
 
 Bootstrap admin is automatically created if none exists.
@@ -108,19 +109,21 @@ This prevents concurrent corruption of shared files.
 
 ### 3. Concurrency Control
 
-The server handles concurrency using:
+The server uses a hybrid model combining **epoll-based event-driven I/O** with a **thread pool**.
 
-- Thread pool (`pthread_create`)
-- Mutex locks (`pthread_mutex_t`)
-- Condition variables (`pthread_cond_t`)
+- The main thread uses `epoll` to monitor all client sockets (non-blocking)
+- Incoming requests are converted into **jobs** and pushed into a queue
+- Worker threads dequeue and process jobs
 
-Producer-Consumer queue:
-- Main thread enqueues client requests
-- Worker threads dequeue and process
+Key design decision:
+- Threads handle **jobs**, not individual client connections
+- This ensures threads are never blocked waiting on I/O
+- All socket I/O is handled asynchronously via `epoll`
 
-Ensures:
-- No race conditions
-- Efficient parallel handling of clients
+This results in:
+- Fully non-blocking worker threads  
+- Better scalability under multiple clients  
+- Clear separation between I/O handling and computation  
 
 ---
 
@@ -203,6 +206,16 @@ Removes dangerous kernel capabilities using `prctl` and libcap.
 ### Resource Limits
 - File descriptor limit via `setrlimit`
 
+### Execution Model
+
+This system executes programs using `execve`, meaning all workloads ultimately run as binaries within the container.
+
+- Compiled binaries run directly  
+- Interpreted programs (e.g., Python) require the corresponding interpreter to exist inside the container filesystem  
+- The system does not provide dependency management or runtime provisioning  
+
+As a result, this runtime focuses on **secure process execution and isolation**, rather than full environment replication like Docker.
+
 ---
 
 ## Security Testing
@@ -220,13 +233,46 @@ All tests are expected to fail inside the container, proving isolation.
 
 ---
 
+## How to test?
+
+- Make sure server and client are running.
+- Run - LOGIN admin admin123 (or create new user by signing up)
+- Run - RUN 0 test_dir ./breakout (make sure you compile breakout.c with the -static flag)
+- See the test results
+
+- Note: This project does not support dependency management or environment replication inside the container.  
+  All programs must either:
+  - be statically compiled binaries, or  
+  - rely on interpreters/libraries already present in the container filesystem.  
+
+---
+
+## Server Shutdown Behavior
+
+The `STOP_SERVER` command implements a **lazy shutdown mechanism**.
+
+- The server process is terminated immediately using a signal-based kill  
+- No coordinated cleanup is performed  
+
+As a result, the following are **not guaranteed to be cleaned up gracefully**:
+
+- cgroups created for container resource control  
+- mount namespaces and bind mounts  
+- running container processes beyond OS-level termination  
+- in-flight jobs or active client sessions  
+
+The operating system reclaims most resources (memory, file descriptors, processes), but some artifacts (such as cgroup directories or mounts) may persist temporarily. So it is recommended to let a container finish execution before killing the server (the `run_container` function performs cleanup when allowed to complete).
+
+This design choice was made to keep the implementation simple and within project scope.
+
+---
+
 ## Key Highlights
 
 - Fully concurrent server using thread pool + epoll  
+- Non-blocking design with epoll-driven I/O and job-based worker threads  
 - Secure authentication with hashed passwords  
 - Strong isolation using namespaces + cgroups + seccomp  
 - Safe file handling using locks  
 - Multiple IPC mechanisms demonstrated  
 - Clear separation of modules  
-
----

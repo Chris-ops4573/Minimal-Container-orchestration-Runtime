@@ -219,7 +219,22 @@ void *worker(void *arg) {
             continue;
         }
 
-        write(client_fd, "Unknown command\nUsage: RUN <process_uid> <path_to_code_files> <executable_command>\n", 80);
+        // ADMIN KILL SERVER
+        // THIS IS A LAZY KILL NO CLEANUP OF CONTAINER CGROUPS, MOUNT SPACES ETC. HAPPENs CLEANLY IF RUN_CONTAINER
+        // ON ANY CLIENT DOESNT EXIT CLEANLY. MAKE SURE TO RUN THIS ONLY AFTER OTHER CLIENTS HAVE EXECUTED THEIR CONTAINERS 
+        if (strncmp(buffer, "STOP_SERVER", 11) == 0) {
+            if (session->role != ROLE_ADMIN) {
+                log_event(session->username, "STOP_SERVER", "failed");
+
+                write(client_fd, "Permission denied\n", 18);
+                continue;
+            }
+
+            log_event(session->username, "GET_LOGS", "succeeded");
+            exit(0);
+        }
+
+        write(client_fd, "Unknown command\nUsage: RUN <process_uid> <path_to_code_files> <executable_command>\n", 84);
     }
 }
 
